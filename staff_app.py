@@ -14,8 +14,12 @@ CORS(app)
 DATABASE_URL = os.environ['DATABASE_URL']
 
 def get_db_connection():
-    """Returns a new psycopg2 connection."""
-    return psycopg2.connect(DATABASE_URL)
+    if 'db' not in g:
+        g.db = psycopg2.connect(DATABASE_URL)
+        # make sure we look in the public schema (Railway often uses it)
+        with g.db.cursor() as cur:
+            cur.execute("SET search_path TO public;")
+    return g.db
 
 # ----------------------------------------------------------------------
 # 1) Submit a new order  (now returns order_id)
@@ -197,3 +201,4 @@ def order_status():
 # ----------------------------------------------------------------------
 if __name__ == '__main__':
     app.run(debug=True)
+
