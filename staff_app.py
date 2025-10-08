@@ -1,11 +1,14 @@
 import os, json
-import psycopg2, psycopg2.extras
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# Local dev only: loads .env if present in the same dir.
-# On Railway, DATABASE_URL comes from service variables, so this is harmless.
+# psycopg v3
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+# For local runs; harmless on Railway where env vars are injected
 load_dotenv()
 
 app = Flask(__name__)
@@ -18,8 +21,8 @@ if not DATABASE_URL:
 # -------- DB helpers --------
 def get_db():
     if "db" not in g:
-        # Railway URL already includes sslmode=require
-        g.db = psycopg2.connect(DATABASE_URL)
+        # Railway URL already includes ?sslmode=require
+        g.db = psycopg.connect(DATABASE_URL)
     return g.db
 
 @app.teardown_appcontext
@@ -40,7 +43,6 @@ def favicon():
 @app.route("/submit-order", methods=["POST"])
 def submit_order():
     data = request.json or {}
-
     items = data.get("items") or []
     try:
         total = float(data.get("total") or 0)
@@ -56,7 +58,7 @@ def submit_order():
         (data.get("name") or "").strip(),
         (data.get("phone") or "").strip(),
         (data.get("table") or "").strip(),
-        json.dumps(items, ensure_ascii=False),
+        Jsonb(items),       # ✅ tell pg this is JSONB
         total,
         "pending",
     )
@@ -71,7 +73,7 @@ def submit_order():
 @app.route("/get-orders", methods=["GET"])
 def get_orders():
     conn = get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    with conn.cursor(row_factory=dict_row) as cur:   # ✅ dict rows
         cur.execute("""
             SELECT id, name, phone, table_number, item, total
             FROM orders
@@ -115,7 +117,7 @@ def delete_all_orders():
 @app.route("/delete-item/<int:order_id>/<int:item_index>", methods=["POST"])
 def delete_item(order_id, item_index):
     conn = get_db()
-    with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    with conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT item FROM orders WHERE id = %s", (order_id,))
         row = cur.fetchone()
         if not row:
@@ -123,7 +125,10 @@ def delete_item(order_id, item_index):
 
         items = row["item"] or []
         if isinstance(items, str):
-            items = json.loads(items)
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
 
         if not (0 <= item_index < len(items)):
             return jsonify({"error": "Item index out of range"}), 400
@@ -133,7 +138,7 @@ def delete_item(order_id, item_index):
             new_total = sum(float(i.get("price", 0)) for i in items)
             cur.execute(
                 "UPDATE orders SET item = %s, total = %s WHERE id = %s",
-                (json.dumps(items, ensure_ascii=False), new_total, order_id),
+                (Jsonb(items), new_total, order_id),
             )
         else:
             cur.execute(
@@ -159,5 +164,5 @@ def order_status():
     return jsonify({"found": False}), 404
 
 if __name__ == "__main__":
-    # Local dev only; Railway uses gunicorn from Procfile
+    # Local dev only; Railway uses gunicorn via Procfile
     app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
